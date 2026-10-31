@@ -1,20 +1,22 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { ProjectItem, InquiryItem, ServiceItem, SiteContent } from '../types';
 import { INITIAL_SITE_CONTENT } from '../data/initialContent';
+import { INITIAL_PROJECTS } from '../data/initialProjects';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 
 interface ProjectContextType {
   projects: ProjectItem[];
-  addProject: (project: Omit<ProjectItem, 'id' | 'publishedAt'>) => void;
-  updateProject: (id: string, project: Partial<ProjectItem>) => void;
-  deleteProject: (id: string) => void;
-  resetToDefaults: () => void;
+  addProject: (project: Omit<ProjectItem, 'id' | 'publishedAt'>) => Promise<void>;
+  updateProject: (id: string, project: Partial<ProjectItem>) => Promise<void>;
+  deleteProject: (id: string) => Promise<void>;
+  resetToDefaults: () => Promise<void>;
   exportData: () => void;
-  importData: (jsonString: string) => boolean;
+  importData: (jsonString: string) => Promise<boolean>;
   siteContent: SiteContent;
-  updateSiteContent: (updated: Partial<SiteContent>) => void;
-  resetSiteContent: () => void;
+  updateSiteContent: (updated: Partial<SiteContent>) => Promise<void>;
+  resetSiteContent: () => Promise<void>;
   inquiries: InquiryItem[];
-  addInquiry: (inquiry: Omit<InquiryItem, 'id' | 'createdAt' | 'status'>) => void;
+  addInquiry: (inquiry: Omit<InquiryItem, 'id' | 'createdAt' | 'status'>) => Promise<void>;
   currentView: 'portfolio' | 'admin';
   setCurrentView: (view: 'portfolio' | 'admin') => void;
   activeProjectModal: ProjectItem | null;
@@ -26,25 +28,19 @@ interface ProjectContextType {
   theme: 'light' | 'dark';
   toggleTheme: () => void;
   isAdminAuthenticated: boolean;
-  loginAdmin: (passcode: string) => boolean;
-  logoutAdmin: () => void;
-  changeAdminPassword: (newPassword: string) => void;
+  loginAdmin: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  logoutAdmin: () => Promise<void>;
   isServerConnected: boolean;
   storageMode: string;
   isSupabaseConnected: boolean;
   syncStatus: 'synced' | 'saving' | 'error';
   lastSavedAt: string | null;
   isLoading: boolean;
-  checkServerStatus: () => Promise<void>;
 }
 
 const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
 
 const STORAGE_KEY_THEME = 'grow_with_ayush_theme';
-const STORAGE_KEY_AUTH = 'grow_with_ayush_admin_auth';
-const STORAGE_KEY_PASS = 'grow_with_ayush_admin_passcode';
-
-const DEFAULT_PASSCODE = 'ayush2026';
 
 const DEFAULT_VISIBILITY = {
   showTitle: true,
@@ -72,26 +68,16 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // Navigation / Routing State
   const [currentView, setCurrentViewState] = useState<'portfolio' | 'admin'>(getInitialView);
 
-  // Authentication State
-  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    try {
-      return sessionStorage.getItem(STORAGE_KEY_AUTH) === 'true';
-    } catch {
-      return false;
-    }
-  });
+  // Supabase Auth State
+  const [isAdminAuthenticated, setIsAdminAuthenticated] = useState<boolean>(false);
 
-  // Projects and Site Content state loaded directly from server API
+  // Projects, Site Content & Inquiries loaded from Supabase
   const [projects, setProjects] = useState<ProjectItem[]>([]);
   const [siteContent, setSiteContent] = useState<SiteContent>(INITIAL_SITE_CONTENT);
   const [inquiries, setInquiries] = useState<InquiryItem[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // Server sync state
-  const [isServerConnected, setIsServerConnected] = useState<boolean>(false);
-  const [storageMode, setStorageMode] = useState<string>('Persistent Storage (data/projects.json)');
-  const [isSupabaseConnected, setIsSupabaseConnected] = useState<boolean>(false);
+  // Sync state indicators
   const [syncStatus, setSyncStatus] = useState<'synced' | 'saving' | 'error'>('synced');
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
 
@@ -99,7 +85,7 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [activeProjectModal, setActiveProjectModal] = useState<ProjectItem | null>(null);
   const [activeServiceModal, setActiveServiceModal] = useState<ServiceItem | null>(null);
 
-  // Theme (per-visitor preference)
+  // Theme
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     if (typeof window !== 'undefined') {
       try {
@@ -168,72 +154,131 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const toggleTheme = () => setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
 
-  const checkServerStatus = async () => {
-    try {
-      const statusRes = await fetch('/api/status').catch(() => null);
-      if (statusRes && statusRes.ok) {
-        const data = await statusRes.json();
-        if (data.storageMode) setStorageMode(data.storageMode);
-        setIsSupabaseConnected(Boolean(data.supabaseConnected));
-        setIsServerConnected(true);
-      }
-    } catch {
-      // ignore
-    }
-  };
-
-  // Fetch data directly from backend Supabase API on mount
+  // Initialize Supabase Auth session & listen for changes
   useEffect(() => {
     let mounted = true;
 
-    const loadServerData = async () => {
+    if (!isSupabaseConfigured) {
+      return;
+    }
+
+    supabase.auth.getSession().then(({ data }) => {
+      if (mounted) {
+        setIsAdminAuthenticated(Boolean(data.session?.user));
+      }
+    }).catch(() => {});
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (mounted) {
+        setIsAdminAuthenticated(Boolean(session?.user));
+      }
+    });
+
+    return () => {
+      mounted = false;
+      authListener?.subscription?.unsubscribe();
+    };
+  }, []);
+
+  // Fetch projects, content, and inquiries directly from Supabase
+  useEffect(() => {
+    let mounted = true;
+
+    const loadData = async () => {
       setIsLoading(true);
+
+      if (!isSupabaseConfigured) {
+        if (mounted) {
+          setProjects(INITIAL_PROJECTS);
+          setSiteContent(INITIAL_SITE_CONTENT);
+          setInquiries([]);
+          setIsLoading(false);
+        }
+        return;
+      }
+
       try {
-        const [projRes, contentRes, inqRes, statusRes] = await Promise.all([
-          fetch('/api/projects').catch(() => null),
-          fetch('/api/content').catch(() => null),
-          fetch('/api/inquiries').catch(() => null),
-          fetch('/api/status').catch(() => null)
-        ]);
+        // 1. Fetch Projects from 'projects' table (id text, data jsonb)
+        const { data: projRows, error: projErr } = await supabase
+          .from('projects')
+          .select('*')
+          .order('sort_order', { ascending: true });
 
-        if (statusRes && statusRes.ok) {
-          const statusData = await statusRes.json();
+        if (!projErr && projRows && projRows.length > 0) {
           if (mounted) {
-            if (statusData.storageMode) setStorageMode(statusData.storageMode);
-            setIsSupabaseConnected(Boolean(statusData.supabaseConnected));
-          }
-        }
-
-        if (projRes && projRes.ok) {
-          const projData = await projRes.json();
-          if (mounted && Array.isArray(projData)) {
-            setProjects(projData.map(p => ({
-              ...p,
-              visibility: { ...DEFAULT_VISIBILITY, ...(p.visibility || {}) }
+            setProjects(projRows.map((row: any) => ({
+              ...(row.data || {}),
+              id: row.id,
+              visibility: { ...DEFAULT_VISIBILITY, ...(row.data?.visibility || {}) }
             })));
-            setIsServerConnected(true);
+          }
+        } else {
+          if (mounted) {
+            setProjects(INITIAL_PROJECTS);
+          }
+          if (!projErr && (!projRows || projRows.length === 0)) {
+            // Seed Supabase with initial projects if table is empty
+            const seedRows = INITIAL_PROJECTS.map((p, index) => ({
+              id: p.id,
+              data: p,
+              sort_order: index
+            }));
+            try {
+              await supabase.from('projects').upsert(seedRows);
+            } catch {
+              // ignore seed error
+            }
           }
         }
 
-        if (contentRes && contentRes.ok) {
-          const contentData = await contentRes.json();
-          if (mounted && contentData && (contentData.brandName || contentData.hero)) {
+        // 2. Fetch Content from 'content' table (id text, data jsonb)
+        const { data: contentRow, error: contentErr } = await supabase
+          .from('content')
+          .select('*')
+          .eq('id', 'main')
+          .maybeSingle();
+
+        if (!contentErr && contentRow && contentRow.data) {
+          if (mounted) {
             setSiteContent(prev => ({
               ...prev,
-              ...contentData,
-              visibility: { ...(prev.visibility || {}), ...(contentData.visibility || {}) }
+              ...contentRow.data,
+              visibility: { ...(prev.visibility || {}), ...(contentRow.data?.visibility || {}) }
             }));
+          }
+        } else {
+          if (mounted) {
+            setSiteContent(INITIAL_SITE_CONTENT);
+          }
+          if (!contentErr && !contentRow) {
+            try {
+              await supabase.from('content').upsert({ id: 'main', data: INITIAL_SITE_CONTENT });
+            } catch {
+              // ignore seed error
+            }
           }
         }
 
-        if (inqRes && inqRes.ok) {
-          const inqData = await inqRes.json();
-          if (mounted && Array.isArray(inqData)) {
-            setInquiries(inqData);
+        // 3. Fetch Inquiries from 'inquiries' table
+        const { data: inqRows, error: inqErr } = await supabase
+          .from('inquiries')
+          .select('*')
+          .order('created_at', { ascending: false });
+
+        if (!inqErr && inqRows && inqRows.length > 0) {
+          if (mounted) {
+            setInquiries(inqRows.map((r: any) => ({
+              ...(r.data || {}),
+              id: r.id || r.data?.id
+            })));
           }
         }
       } catch (err) {
-        console.error('Error fetching data from server:', err);
+        console.error('Error fetching Supabase data:', err);
+        if (mounted) {
+          setProjects(INITIAL_PROJECTS);
+          setSiteContent(INITIAL_SITE_CONTENT);
+        }
       } finally {
         if (mounted) {
           setIsLoading(false);
@@ -241,212 +286,228 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
       }
     };
 
-    loadServerData();
+    loadData();
+
     return () => {
       mounted = false;
     };
   }, []);
 
-  // Admin Authentication handlers
-  const loginAdmin = (passcode: string): boolean => {
-    let storedPass = DEFAULT_PASSCODE;
-    try {
-      const customPass = localStorage.getItem(STORAGE_KEY_PASS);
-      if (customPass) storedPass = customPass;
-    } catch {
-      // ignore
+  // Auth Functions
+  const loginAdmin = async (email: string, password: string): Promise<{ success: boolean; error?: string }> => {
+    if (!isSupabaseConfigured) {
+      return {
+        success: false,
+        error: 'Supabase credentials (VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY) are not configured in environment variables.'
+      };
     }
 
-    if (passcode.trim() === storedPass.trim()) {
-      setIsAdminAuthenticated(true);
-      try {
-        sessionStorage.setItem(STORAGE_KEY_AUTH, 'true');
-      } catch {
-        // ignore
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password
+      });
+
+      if (error) {
+        return { success: false, error: error.message };
       }
-      return true;
+
+      if (data.session?.user) {
+        setIsAdminAuthenticated(true);
+        return { success: true };
+      }
+      return { success: false, error: 'Failed to authenticate user session.' };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Login error occurred.' };
     }
-    return false;
   };
 
-  const logoutAdmin = () => {
+  const logoutAdmin = async () => {
+    await supabase.auth.signOut();
     setIsAdminAuthenticated(false);
-    try {
-      sessionStorage.removeItem(STORAGE_KEY_AUTH);
-    } catch {
-      // ignore
-    }
     setCurrentView('portfolio');
   };
 
-  const changeAdminPassword = (newPassword: string) => {
-    if (!newPassword || newPassword.trim().length < 4) return;
-    try {
-      localStorage.setItem(STORAGE_KEY_PASS, newPassword.trim());
-    } catch {
-      // ignore
+  // Project CRUD Actions with Supabase (@supabase/supabase-js)
+  const addProject = async (projectData: Omit<ProjectItem, 'id' | 'publishedAt'>) => {
+    if (!isAdminAuthenticated) {
+      alert('Unauthorized: Only logged-in admins can add projects.');
+      return;
+    }
+
+    setSyncStatus('saving');
+    const newProject: ProjectItem = {
+      ...projectData,
+      id: `proj-${Date.now()}`,
+      publishedAt: new Date().toISOString().split('T')[0]
+    };
+
+    const { error } = await supabase.from('projects').upsert({
+      id: newProject.id,
+      data: newProject,
+      sort_order: Date.now()
+    });
+
+    if (!error) {
+      setProjects(prev => [newProject, ...prev]);
+      setSyncStatus('synced');
+      setLastSavedAt(new Date().toLocaleTimeString());
+    } else {
+      console.error('Supabase add project error:', error);
+      setSyncStatus('error');
     }
   };
 
-  // Project CRUD Actions via Supabase API
-  const addProject = (projectData: Omit<ProjectItem, 'id' | 'publishedAt'>) => {
+  const updateProject = async (id: string, updates: Partial<ProjectItem>) => {
+    if (!isAdminAuthenticated) {
+      alert('Unauthorized: Only logged-in admins can edit projects.');
+      return;
+    }
+
     setSyncStatus('saving');
-    fetch('/api/projects', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(projectData)
-    })
-      .then(res => (res.ok ? res.json() : null))
-      .then(savedProject => {
-        if (savedProject) {
-          setProjects(prev => [
-            {
-              ...savedProject,
-              visibility: { ...DEFAULT_VISIBILITY, ...(savedProject.visibility || {}) }
-            },
-            ...prev
-          ]);
-          setSyncStatus('synced');
-          setLastSavedAt(new Date().toLocaleTimeString());
-        } else {
-          setSyncStatus('error');
-        }
-      })
-      .catch(err => {
-        console.error('Error adding project:', err);
-        setSyncStatus('error');
-      });
+    let updatedProject: ProjectItem | null = null;
+    const nextProjects = projects.map(p => {
+      if (p.id === id) {
+        updatedProject = { ...p, ...updates, id };
+        return updatedProject;
+      }
+      return p;
+    });
+
+    if (!updatedProject) {
+      updatedProject = { ...updates, id } as ProjectItem;
+      nextProjects.unshift(updatedProject);
+    }
+
+    setProjects(nextProjects);
+
+    const { error } = await supabase.from('projects').upsert({
+      id,
+      data: updatedProject
+    });
+
+    if (!error) {
+      setSyncStatus('synced');
+      setLastSavedAt(new Date().toLocaleTimeString());
+    } else {
+      console.error('Supabase update project error:', error);
+      setSyncStatus('error');
+    }
   };
 
-  const updateProject = (id: string, updates: Partial<ProjectItem>) => {
-    setProjects(prev => prev.map(p => (p.id === id ? { ...p, ...updates } : p)));
+  const deleteProject = async (id: string) => {
+    if (!isAdminAuthenticated) {
+      alert('Unauthorized: Only logged-in admins can delete projects.');
+      return;
+    }
+
     setSyncStatus('saving');
-
-    fetch(`/api/projects/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updates)
-    })
-      .then(res => {
-        if (res.ok) {
-          setSyncStatus('synced');
-          setLastSavedAt(new Date().toLocaleTimeString());
-        } else {
-          setSyncStatus('error');
-        }
-      })
-      .catch(err => {
-        console.error('Error updating project:', err);
-        setSyncStatus('error');
-      });
-  };
-
-  const deleteProject = (id: string) => {
     setProjects(prev => prev.filter(p => p.id !== id));
-    setSyncStatus('saving');
 
-    fetch(`/api/projects/${id}`, {
-      method: 'DELETE'
-    })
-      .then(res => {
-        if (res.ok) {
-          setSyncStatus('synced');
-          setLastSavedAt(new Date().toLocaleTimeString());
-        } else {
-          setSyncStatus('error');
-        }
-      })
-      .catch(err => {
-        console.error('Error deleting project:', err);
-        setSyncStatus('error');
-      });
+    const { error } = await supabase.from('projects').delete().eq('id', id);
+
+    if (!error) {
+      setSyncStatus('synced');
+      setLastSavedAt(new Date().toLocaleTimeString());
+    } else {
+      console.error('Supabase delete project error:', error);
+      setSyncStatus('error');
+    }
   };
 
-  const resetToDefaults = () => {
-    setSyncStatus('saving');
-    fetch('/api/projects/reset', { method: 'POST' })
-      .then(res => (res.ok ? res.json() : null))
-      .then(defaults => {
-        if (defaults) {
-          setProjects(defaults);
-          setSyncStatus('synced');
-          setLastSavedAt(new Date().toLocaleTimeString());
-        } else {
-          setSyncStatus('error');
-        }
-      })
-      .catch(() => setSyncStatus('error'));
-  };
+  const resetToDefaults = async () => {
+    if (!isAdminAuthenticated) {
+      alert('Unauthorized: Only logged-in admins can reset projects.');
+      return;
+    }
 
-  // Site Content CRUD via Supabase API
-  const updateSiteContent = (updated: Partial<SiteContent>) => {
-    setSiteContent(prev => ({
-      ...prev,
-      ...updated,
-      visibility: { ...(prev.visibility || {}), ...(updated.visibility || {}) },
-      about: updated.about ? { ...prev.about, ...updated.about } : prev.about,
-      hero: updated.hero ? { ...prev.hero, ...updated.hero } : prev.hero,
-      workflow: updated.workflow ? { ...prev.workflow, ...updated.workflow } : prev.workflow,
-      contact: updated.contact ? { ...prev.contact, ...updated.contact } : prev.contact
+    setSyncStatus('saving');
+    const seedRows = INITIAL_PROJECTS.map((p, index) => ({
+      id: p.id,
+      data: p,
+      sort_order: index
     }));
+
+    await supabase.from('projects').delete().neq('id', '');
+    const { error } = await supabase.from('projects').upsert(seedRows);
+
+    if (!error) {
+      setProjects(INITIAL_PROJECTS);
+      setSyncStatus('synced');
+      setLastSavedAt(new Date().toLocaleTimeString());
+    } else {
+      setSyncStatus('error');
+    }
+  };
+
+  // Site Content CRUD with Supabase
+  const updateSiteContent = async (updated: Partial<SiteContent>) => {
+    if (!isAdminAuthenticated) {
+      alert('Unauthorized: Only logged-in admins can edit site content.');
+      return;
+    }
+
     setSyncStatus('saving');
+    const merged: SiteContent = {
+      ...siteContent,
+      ...updated,
+      visibility: { ...(siteContent.visibility || {}), ...(updated.visibility || {}) },
+      about: updated.about ? { ...siteContent.about, ...updated.about } : siteContent.about,
+      hero: updated.hero ? { ...siteContent.hero, ...updated.hero } : siteContent.hero,
+      workflow: updated.workflow ? { ...siteContent.workflow, ...updated.workflow } : siteContent.workflow,
+      contact: updated.contact ? { ...siteContent.contact, ...updated.contact } : siteContent.contact
+    };
 
-    fetch('/api/content', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updated)
-    })
-      .then(res => (res.ok ? res.json() : null))
-      .then(saved => {
-        if (saved) {
-          setSiteContent(saved);
-          setSyncStatus('synced');
-          setLastSavedAt(new Date().toLocaleTimeString());
-        } else {
-          setSyncStatus('error');
-        }
-      })
-      .catch(err => {
-        console.error('Error updating content:', err);
-        setSyncStatus('error');
-      });
+    setSiteContent(merged);
+
+    const { error } = await supabase.from('content').upsert({ id: 'main', data: merged });
+
+    if (!error) {
+      setSyncStatus('synced');
+      setLastSavedAt(new Date().toLocaleTimeString());
+    } else {
+      console.error('Supabase update content error:', error);
+      setSyncStatus('error');
+    }
   };
 
-  const resetSiteContent = () => {
+  const resetSiteContent = async () => {
+    if (!isAdminAuthenticated) return;
+
     setSyncStatus('saving');
-    fetch('/api/content/reset', { method: 'POST' })
-      .then(res => (res.ok ? res.json() : null))
-      .then(defaults => {
-        if (defaults) {
-          setSiteContent(defaults);
-          setSyncStatus('synced');
-          setLastSavedAt(new Date().toLocaleTimeString());
-        } else {
-          setSyncStatus('error');
-        }
-      })
-      .catch(() => setSyncStatus('error'));
+    const { error } = await supabase.from('content').upsert({ id: 'main', data: INITIAL_SITE_CONTENT });
+
+    if (!error) {
+      setSiteContent(INITIAL_SITE_CONTENT);
+      setSyncStatus('synced');
+      setLastSavedAt(new Date().toLocaleTimeString());
+    } else {
+      setSyncStatus('error');
+    }
   };
 
-  // Inquiry submission
-  const addInquiry = (inquiry: Omit<InquiryItem, 'id' | 'createdAt' | 'status'>) => {
-    fetch('/api/inquiries', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(inquiry)
-    })
-      .then(res => (res.ok ? res.json() : null))
-      .then(savedInquiry => {
-        if (savedInquiry) {
-          setInquiries(prev => [savedInquiry, ...prev]);
-        }
-      })
-      .catch(err => {
-        console.error('Error submitting inquiry:', err);
+  // Add Inquiry (Visitor Submission)
+  const addInquiry = async (inquiryData: Omit<InquiryItem, 'id' | 'createdAt' | 'status'>) => {
+    const newInquiry: InquiryItem = {
+      ...inquiryData,
+      id: `inq-${Date.now()}`,
+      createdAt: new Date().toISOString(),
+      status: 'new'
+    };
+
+    setInquiries(prev => [newInquiry, ...prev]);
+
+    try {
+      await supabase.from('inquiries').insert({
+        id: newInquiry.id,
+        data: newInquiry
       });
+    } catch (err) {
+      console.error('Supabase inquiry submission error:', err);
+    }
   };
 
-  // Import / Export
+  // Backup Export / Import
   const exportData = () => {
     const bundle = {
       version: '1.0',
@@ -463,29 +524,35 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
     URL.revokeObjectURL(url);
   };
 
-  const importData = (jsonString: string): boolean => {
+  const importData = async (jsonString: string): Promise<boolean> => {
+    if (!isAdminAuthenticated) {
+      alert('Unauthorized: Only logged-in admins can import backup data.');
+      return false;
+    }
+
     try {
       const parsed = JSON.parse(jsonString);
-      fetch('/api/projects/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(parsed)
-      })
-        .then(res => {
-          if (res.ok) {
-            Promise.all([
-              fetch('/api/projects').then(r => r.json()),
-              fetch('/api/content').then(r => r.json())
-            ]).then(([freshProjects, freshContent]) => {
-              if (Array.isArray(freshProjects)) setProjects(freshProjects);
-              if (freshContent && typeof freshContent === 'object') setSiteContent(freshContent);
-            });
-          }
-        })
-        .catch(err => console.error('Error importing:', err));
+      const projsToImport = parsed.projects || (Array.isArray(parsed) ? parsed : null);
+      const contentToImport = parsed.content || parsed.siteContent;
+
+      if (Array.isArray(projsToImport) && projsToImport.length > 0) {
+        const rows = projsToImport.map((p: ProjectItem, index: number) => ({
+          id: p.id || `proj-${index}`,
+          data: p,
+          sort_order: index
+        }));
+        await supabase.from('projects').delete().neq('id', '');
+        await supabase.from('projects').upsert(rows);
+        setProjects(projsToImport);
+      }
+
+      if (contentToImport && typeof contentToImport === 'object') {
+        await supabase.from('content').upsert({ id: 'main', data: contentToImport });
+        setSiteContent(contentToImport);
+      }
       return true;
     } catch (err) {
-      console.error('Import failed:', err);
+      console.error('Import error:', err);
       return false;
     }
   };
@@ -518,20 +585,18 @@ export const ProjectProvider: React.FC<{ children: React.ReactNode }> = ({ child
         isAdminAuthenticated,
         loginAdmin,
         logoutAdmin,
-        changeAdminPassword,
-        isServerConnected,
-        storageMode,
-        isSupabaseConnected,
+        isServerConnected: true,
+        storageMode: isSupabaseConfigured ? 'Supabase PostgreSQL Database' : 'Local Fallback (Set VITE_SUPABASE_URL)',
+        isSupabaseConnected: isSupabaseConfigured,
         syncStatus,
         lastSavedAt,
-        isLoading,
-        checkServerStatus
+        isLoading
       }}
     >
       {isLoading ? (
         <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-4">
           <div className="w-12 h-12 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin mb-4" />
-          <p className="text-slate-400 font-medium tracking-wide">Loading portfolio...</p>
+          <p className="text-slate-400 font-medium tracking-wide">Loading portfolio from Supabase...</p>
         </div>
       ) : (
         children

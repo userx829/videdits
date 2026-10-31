@@ -1,21 +1,29 @@
 import React, { useState } from 'react';
 import { useProjects } from '../../context/ProjectContext';
-import { Lock, ArrowRight, Eye, EyeOff, ArrowLeft, ShieldCheck } from 'lucide-react';
+import { Lock, ArrowRight, Eye, EyeOff, ArrowLeft, ShieldCheck, Mail, AlertCircle, Loader2 } from 'lucide-react';
 
 export const AdminLogin: React.FC = () => {
   const { loginAdmin, setCurrentView, siteContent } = useProjects();
-  const [passcode, setPasscode] = useState('');
-  const [showPasscode, setShowPasscode] = useState(false);
-  const [error, setError] = useState(false);
-  const [shake, setShake] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const success = loginAdmin(passcode);
-    if (!success) {
-      setError(true);
-      setShake(true);
-      setTimeout(() => setShake(false), 500);
+    setErrorMessage(null);
+    setIsSubmitting(true);
+
+    try {
+      const res = await loginAdmin(email, password);
+      if (!res.success) {
+        setErrorMessage(res.error || 'Invalid email or password. Access denied.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Login failed.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -37,64 +45,92 @@ export const AdminLogin: React.FC = () => {
             <Lock className="w-7 h-7" />
           </div>
           <h2 className="text-2xl font-bold tracking-tight text-[#1a1c19] dark:text-[#f1f1ec]">
-            Creator Studio Lock
+            Creator Studio Auth
           </h2>
           <p className="text-xs text-[#414844] dark:text-[#b9c1ba]">
-            Authorized access only for {siteContent.brandName}
+            Supabase Authenticated Admin Access for {siteContent.brandName}
           </p>
         </div>
 
         {/* Login Form */}
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+          {errorMessage && (
+            <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-600 dark:text-rose-400 text-xs font-medium flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
           <div className="space-y-1.5">
             <label className="text-xs font-semibold text-[#1a1c19] dark:text-[#f1f1ec]">
-              Enter Studio Passcode
+              Admin Email Address
             </label>
-            <div className={`relative ${shake ? 'animate-shake' : ''}`}>
+            <div className="relative">
               <input
-                type={showPasscode ? 'text' : 'password'}
+                type="email"
                 required
                 autoFocus
-                value={passcode}
+                value={email}
                 onChange={e => {
-                  setPasscode(e.target.value);
-                  if (error) setError(false);
+                  setEmail(e.target.value);
+                  if (errorMessage) setErrorMessage(null);
                 }}
-                placeholder="Enter password..."
-                className={`w-full bg-[#fafaf5] dark:bg-[#151715] pl-4 pr-11 py-3 rounded-xl text-sm text-[#1a1c19] dark:text-[#f1f1ec] border transition-all focus:outline-none focus:ring-2 ${
-                  error
-                    ? 'border-rose-500 focus:ring-rose-500'
-                    : 'border-[#eeeee9] dark:border-[#2a302a] focus:ring-[#2d5342]'
-                }`}
+                placeholder="admin@example.com"
+                className="w-full bg-[#fafaf5] dark:bg-[#151715] pl-10 pr-4 py-3 rounded-xl text-sm text-[#1a1c19] dark:text-[#f1f1ec] border border-[#eeeee9] dark:border-[#2a302a] focus:outline-none focus:ring-2 focus:ring-[#2d5342] transition-all"
+              />
+              <Mail className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-[#414844] dark:text-[#b9c1ba]" />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-[#1a1c19] dark:text-[#f1f1ec]">
+              Supabase Password
+            </label>
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                required
+                value={password}
+                onChange={e => {
+                  setPassword(e.target.value);
+                  if (errorMessage) setErrorMessage(null);
+                }}
+                placeholder="Enter admin password..."
+                className="w-full bg-[#fafaf5] dark:bg-[#151715] pl-4 pr-11 py-3 rounded-xl text-sm text-[#1a1c19] dark:text-[#f1f1ec] border border-[#eeeee9] dark:border-[#2a302a] focus:outline-none focus:ring-2 focus:ring-[#2d5342] transition-all"
               />
               <button
                 type="button"
-                onClick={() => setShowPasscode(prev => !prev)}
+                onClick={() => setShowPassword(prev => !prev)}
                 className="absolute right-3.5 top-1/2 -translate-y-1/2 text-[#414844] dark:text-[#b9c1ba] hover:text-[#1a1c19] dark:hover:text-white"
                 aria-label="Toggle password visibility"
               >
-                {showPasscode ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
             </div>
-            {error && (
-              <p className="text-xs font-medium text-rose-500 mt-1">
-                Incorrect passcode. Access denied.
-              </p>
-            )}
           </div>
 
           <button
             type="submit"
-            className="w-full bg-[#2d5342] text-white py-3.5 rounded-xl text-sm font-semibold hover:bg-[#456b59] transition-all flex items-center justify-center gap-2 shadow-md active:scale-98 mt-2"
+            disabled={isSubmitting}
+            className="w-full bg-[#2d5342] text-white py-3.5 rounded-xl text-sm font-semibold hover:bg-[#456b59] transition-all flex items-center justify-center gap-2 shadow-md active:scale-98 mt-2 disabled:opacity-50 cursor-pointer"
           >
-            <span>Unlock Studio Dashboard</span>
-            <ArrowRight className="w-4 h-4" />
+            {isSubmitting ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Authenticating with Supabase...</span>
+              </>
+            ) : (
+              <>
+                <span>Log In with Supabase Auth</span>
+                <ArrowRight className="w-4 h-4" />
+              </>
+            )}
           </button>
         </form>
 
         <div className="flex items-center justify-center gap-2 pt-2 border-t border-[#eeeee9] dark:border-[#2a302a] text-[11px] text-[#414844] dark:text-[#b9c1ba]">
           <ShieldCheck className="w-3.5 h-3.5 text-[#2d5342] dark:text-[#528c70]" />
-          <span>Protected Administrative Access</span>
+          <span>Protected Supabase Auth Session</span>
         </div>
       </div>
     </div>

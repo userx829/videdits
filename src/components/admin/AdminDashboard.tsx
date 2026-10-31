@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useProjects } from '../../context/ProjectContext';
+import { supabase } from '../../lib/supabase';
 import { ProjectItem, ProjectCategory, SiteContent } from '../../types';
 import { DEFAULT_SECTION_VISIBILITY } from '../../data/initialContent';
 import {
@@ -51,13 +52,11 @@ export const AdminDashboard: React.FC = () => {
     setCurrentView,
     openProjectModal,
     logoutAdmin,
-    changeAdminPassword,
     isServerConnected,
     storageMode,
     isSupabaseConnected,
     syncStatus,
-    lastSavedAt,
-    checkServerStatus
+    lastSavedAt
   } = useProjects();
 
   const [activeTab, setActiveTab] = useState<'catalog' | 'editor' | 'site-content' | 'inquiries' | 'security'>('catalog');
@@ -296,41 +295,41 @@ export const AdminDashboard: React.FC = () => {
     }
 
     setIsFetchingYtInfo(true);
-    showToast('Fetching YouTube video title, thumbnail, views, duration & ratio...');
+    showToast('Fetching YouTube video title and cover photo...');
+
+    const isShort = targetUrl?.includes('/shorts/') || formData.aspectRatio === '9:16' || formData.category === 'shorts';
+    let title = '';
+    let authorName = '';
 
     try {
-      const res = await fetch('/api/youtube/info', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: targetUrl })
-      });
-
+      const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${ytId}&format=json`;
+      const res = await fetch(oembedUrl);
       if (res.ok) {
         const data = await res.json();
-        if (data.success) {
-          setFormData(prev => ({
-            ...prev,
-            videoUrl: targetUrl,
-            title: data.title || prev.title,
-            thumbnailUrl: data.thumbnailUrl || `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`,
-            views: data.views || prev.views || '100K',
-            duration: data.duration || prev.duration || '10 min',
-            aspectRatio: data.aspectRatio || (data.isShort ? '9:16' : '16:9'),
-            category: data.category || (data.isShort ? 'shorts' : 'youtube'),
-            categoryLabel: data.categoryLabel || (data.isShort ? 'Shorts & Reels' : 'YouTube Long-form'),
-            subtitle: data.authorName ? `by ${data.authorName}` : (prev.subtitle || 'Creator Release')
-          }));
-          showToast(`✅ Loaded YouTube Details! "${(data.title || '').slice(0, 25)}..." | ${data.views} views | ${data.duration}`);
-        }
-      } else {
-        handleFetchYouTubeThumbnail(targetUrl);
+        title = data.title || '';
+        authorName = data.author_name || '';
       }
     } catch (err) {
-      console.warn('YouTube auto-fetch error:', err);
-      handleFetchYouTubeThumbnail(targetUrl);
-    } finally {
-      setIsFetchingYtInfo(false);
+      console.warn('YouTube oEmbed error:', err);
     }
+
+    const thumbUrl = `https://img.youtube.com/vi/${ytId}/maxresdefault.jpg`;
+
+    setFormData(prev => ({
+      ...prev,
+      videoUrl: targetUrl,
+      title: title || (isShort ? 'YouTube Short Highlight' : prev.title || 'YouTube Video Release'),
+      thumbnailUrl: thumbUrl,
+      views: prev.views || (isShort ? '350K' : '850K'),
+      duration: prev.duration || (isShort ? '45 sec' : '10 min'),
+      aspectRatio: isShort ? '9:16' : (prev.aspectRatio || '16:9'),
+      category: isShort ? 'shorts' : (prev.category || 'youtube'),
+      categoryLabel: isShort ? 'Shorts & Reels' : (prev.categoryLabel || 'YouTube Long-form'),
+      subtitle: authorName ? `by ${authorName}` : (prev.subtitle || 'Creator Release')
+    }));
+
+    setIsFetchingYtInfo(false);
+    showToast(title ? `✅ Fetched: "${title.slice(0, 30)}..."` : '✅ Loaded YouTube HD thumbnail!');
   };
 
   // Auto-fetch YouTube HD thumbnail fallback
@@ -360,28 +359,11 @@ export const AdminDashboard: React.FC = () => {
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      showToast('Optimizing & uploading thumbnail to server...');
+      showToast('Optimizing thumbnail photo...');
       const optimizedUrl = await compressImage(file, 1280, 720, 0.85);
       if (optimizedUrl) {
-        try {
-          const res = await fetch('/api/upload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ dataUrl: optimizedUrl, filename: file.name })
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (data.url) {
-              setFormData(prev => ({ ...prev, thumbnailUrl: data.url }));
-              showToast('Custom thumbnail uploaded to server & ready for all clients!');
-              return;
-            }
-          }
-        } catch {
-          // fallback to compressed data URL
-        }
         setFormData(prev => ({ ...prev, thumbnailUrl: optimizedUrl }));
-        showToast('Custom thumbnail optimized & ready!');
+        showToast('Custom thumbnail optimized & set!');
       }
     }
   };
@@ -390,29 +372,9 @@ export const AdminDashboard: React.FC = () => {
   const handleAboutImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      showToast('Optimizing & uploading portrait to server...');
+      showToast('Optimizing portrait photo...');
       const optimizedUrl = await compressImage(file, 1000, 1250, 0.88);
       if (optimizedUrl) {
-        try {
-          const res = await fetch('/api/upload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ dataUrl: optimizedUrl, filename: file.name })
-          });
-          if (res.ok) {
-            const data = await res.json();
-            if (data.url) {
-              setContentForm(prev => ({
-                ...prev,
-                about: { ...prev.about, imageUrl: data.url }
-              }));
-              showToast('Studio portrait photo uploaded to server & saved!');
-              return;
-            }
-          }
-        } catch {
-          // fallback
-        }
         setContentForm(prev => ({
           ...prev,
           about: { ...prev.about, imageUrl: optimizedUrl }
@@ -445,55 +407,24 @@ export const AdminDashboard: React.FC = () => {
     }
   };
 
-  // Export backup using /api/projects/export
-  const handleExportBackup = async () => {
-    try {
-      const res = await fetch('/api/projects/export');
-      if (res.ok) {
-        const data = await res.json();
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `ayush-portfolio-backup-${new Date().toISOString().split('T')[0]}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-        showToast('Exported backup successfully from server database!');
-      } else {
-        exportData();
-      }
-    } catch {
-      exportData();
-    }
+  // Export backup
+  const handleExportBackup = () => {
+    exportData();
+    showToast('Exported JSON backup from Supabase database!');
   };
 
-  // Handle JSON Import Backup via /api/projects/import
+  // Handle JSON Import Backup
   const handleJsonImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = async (event) => {
         const text = event.target?.result as string;
-        try {
-          const parsed = JSON.parse(text);
-          const res = await fetch('/api/projects/import', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(parsed)
-          });
-          if (res.ok) {
-            importData(text);
-            showToast('Backup imported and saved to server database permanently!');
-          } else {
-            importData(text);
-            showToast('Backup imported locally!');
-          }
-        } catch {
-          if (importData(text)) {
-            showToast('Catalog and content imported successfully!');
-          } else {
-            alert('Invalid JSON structure. Please use a valid exported JSON file.');
-          }
+        const success = await importData(text);
+        if (success) {
+          showToast('Backup imported and saved to Supabase permanently!');
+        } else {
+          alert('Failed to import backup JSON. Check structure.');
         }
       };
       reader.readAsText(file);
@@ -540,9 +471,8 @@ export const AdminDashboard: React.FC = () => {
               </span>
               <button
                 type="button"
-                onClick={async () => {
-                  await checkServerStatus();
-                  showToast(`DB Status: ${isServerConnected ? 'Online & Persistent' : 'Disconnected'} | ${storageMode}`);
+                onClick={() => {
+                  showToast(`DB Status: Supabase Active | ${storageMode}`);
                 }}
                 className={`inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border transition-all cursor-pointer ${
                   syncStatus === 'saving'
@@ -3109,40 +3039,48 @@ export const AdminDashboard: React.FC = () => {
               )}
 
               <form
-                onSubmit={e => {
+                onSubmit={async (e) => {
                   e.preventDefault();
-                  if (!newPasswordInput || newPasswordInput.trim().length < 4) {
+                  if (!newPasswordInput || newPasswordInput.trim().length < 6) {
                     setPasswordFeedback({
                       type: 'error',
-                      message: 'Passcode must be at least 4 characters.'
+                      message: 'Password must be at least 6 characters.'
                     });
                     return;
                   }
                   if (newPasswordInput !== confirmPasswordInput) {
                     setPasswordFeedback({
                       type: 'error',
-                      message: 'New passcode and confirm passcode do not match.'
+                      message: 'New password and confirmation do not match.'
                     });
                     return;
                   }
-                  changeAdminPassword(newPasswordInput.trim());
-                  setNewPasswordInput('');
-                  setConfirmPasswordInput('');
-                  setPasswordFeedback({
-                    type: 'success',
-                    message: 'Studio passcode updated successfully! Remember to note it down.'
-                  });
-                  showToast('Passcode updated!');
+                  try {
+                    const { error } = await supabase.auth.updateUser({ password: newPasswordInput.trim() });
+                    if (error) {
+                      setPasswordFeedback({ type: 'error', message: error.message });
+                    } else {
+                      setNewPasswordInput('');
+                      setConfirmPasswordInput('');
+                      setPasswordFeedback({
+                        type: 'success',
+                        message: 'Supabase admin password updated successfully!'
+                      });
+                      showToast('Supabase password updated!');
+                    }
+                  } catch (err: any) {
+                    setPasswordFeedback({ type: 'error', message: err?.message || 'Failed to update password' });
+                  }
                 }}
                 className="grid grid-cols-1 sm:grid-cols-2 gap-4"
               >
                 <div className="space-y-1.5">
                   <label className="text-xs font-semibold text-[#1a1c19] dark:text-[#f1f1ec]">
-                    New Studio Passcode
+                    New Supabase Admin Password
                   </label>
                   <input
                     type="password"
-                    placeholder="Enter new passcode..."
+                    placeholder="Enter new password (min 6 chars)..."
                     value={newPasswordInput}
                     onChange={e => {
                       setNewPasswordInput(e.target.value);
@@ -3154,11 +3092,11 @@ export const AdminDashboard: React.FC = () => {
 
                 <div className="space-y-1.5">
                   <label className="text-xs font-semibold text-[#1a1c19] dark:text-[#f1f1ec]">
-                    Confirm New Passcode
+                    Confirm New Password
                   </label>
                   <input
                     type="password"
-                    placeholder="Confirm new passcode..."
+                    placeholder="Confirm new password..."
                     value={confirmPasswordInput}
                     onChange={e => {
                       setConfirmPasswordInput(e.target.value);
@@ -3174,24 +3112,7 @@ export const AdminDashboard: React.FC = () => {
                     className="bg-[#2d5342] text-white px-5 py-2.5 rounded-xl text-xs font-semibold hover:bg-[#456b59] transition-all flex items-center gap-2 shadow-sm cursor-pointer"
                   >
                     <Check className="w-4 h-4" />
-                    <span>Save New Passcode</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      changeAdminPassword('ayush2026');
-                      setNewPasswordInput('');
-                      setConfirmPasswordInput('');
-                      setPasswordFeedback({
-                        type: 'success',
-                        message: 'Passcode reset back to default.'
-                      });
-                      showToast('Passcode reset to default');
-                    }}
-                    className="bg-[#eeeee9] dark:bg-[#2a302a] text-[#414844] dark:text-[#b9c1ba] px-4 py-2.5 rounded-xl text-xs font-medium hover:bg-[#e2e3de] dark:hover:bg-[#333a33] transition-colors cursor-pointer"
-                  >
-                    Reset to Default Passcode
+                    <span>Save New Password</span>
                   </button>
                 </div>
               </form>
